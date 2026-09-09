@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: #0d1b12;
+  color: #e8e8e8;
+}
+
+/* Card frames: text-based, no art assets */
+.card-frame {
+  background: linear-gradient(160deg, #1d2b22 0%, #16211a 100%);
+  border: 1px solid #3a4a3f;
+  border-radius: 8px;
+}
+.card-frame.tapped {
+  transform: rotate(8deg);
+  opacity: 0.92;
+}
+
+.stack-object {
+  border-left: 3px solid #e69f00;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
