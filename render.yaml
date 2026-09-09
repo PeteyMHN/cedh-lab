@@ -1,0 +1,18 @@
+# Render blueprint for the cEDH Lab game server (free tier).
+# Deploy: Render dashboard → New → Blueprint → select this repo.
+# The web client (Vercel) talks to this service's URL via
+# NEXT_PUBLIC_SERVER_URL / NEXT_PUBLIC_WS_URL.
+services:
+  - type: web
+    name: cedh-lab-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run start --workspace @cedh-lab/server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Set after the web app is deployed to lock CORS to your domain:
+      # - key: WEB_ORIGIN
+      #   value: https://your-app.vercel.app

@@ -10,6 +10,7 @@
  * roadmap item (see README.md).
  */
 import Fastify from 'fastify';
+import cors from '@fastify/cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ulid } from 'ulid';
 import { Registry } from '@cedh-lab/cards';
@@ -32,6 +33,13 @@ const sockets = new Map<string, Map<number, Set<WebSocket>>>();
 const chatTimes = new WeakMap<WebSocket, number[]>();
 
 const fastify = Fastify({ logger: false });
+
+// CORS: the web client is hosted on a different origin (e.g. Vercel) in
+// production. Restrict to the configured web origin when set.
+await fastify.register(cors, {
+  origin: process.env.WEB_ORIGIN ?? true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+});
 
 // ---------- helpers ----------
 
@@ -69,6 +77,9 @@ function seatOfToken(pod: PodRecord, token: string): number | null {
 }
 
 // ---------- REST ----------
+
+// Unauthenticated health check (load balancers, Render).
+fastify.get('/api/health', async () => ({ ok: true, rooms: rooms.size }));
 
 // DEV-ONLY auth: mint a bearer token for any name. Not production auth.
 fastify.post('/api/auth/dev-login', async (req) => {
