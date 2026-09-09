@@ -70,12 +70,11 @@ export function buildSeatView(
   engine: Engine,
   seat: number,
   memory: Map<number, KnownCard[]>,
-  pendingChoice: ChoiceRequest | null,
 ): SeatView {
   const observation = observe(engine, seat, memory);
   const legal = engine.legalActionsFor(seat);
-  const pc = pendingChoice && pendingChoice.player === seat ? pendingChoice : null;
-  return { observation, legal, pendingChoice: pc };
+  const pc = engine.game.pendingChoice;
+  return { observation, legal, pendingChoice: pc && pc.player === seat ? pc : null };
 }
 
 /** Assert (in dev/test) that a serialized view contains no opponent card identities. */

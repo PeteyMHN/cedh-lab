@@ -1,18 +1,21 @@
 /**
  * driver.ts — GameRoom: the authoritative game driver.
  *
- * Owns one Engine, runs the priority loop, consults AI seats, awaits human
- * choices, and broadcasts filtered events + per-seat views after every mutation.
+ * Owns one Engine, runs the priority loop, consults AI seats, defers human
+ * choices over WebSockets, and broadcasts filtered events + per-seat views
+ * after every mutation.
  *
- * Written against the v0.2 async contract via DriverEngine (see engine-adapter.ts).
- * AI turns delegate to the AI package's canonical entry points (HeuristicPolicy,
- * applyLegalAction, matchesLegal) — the driver only orchestrates, never invents
- * its own policy or application logic. Transport (WS/REST) lives in index.ts
- * and talks to GameRoom through the small surface below.
+ * Wired directly to the v0.2 async engine (packages/engine). The driver only
+ * orchestrates: it maps client intents, validates against `legalActionsFor`,
+ * installs the choicePolicy that routes choices to AI policies or deferred
+ * human resolvers, and runs the priority loop. Rules semantics stay in the
+ * engine — nothing here reimplements them.
  */
-import { Engine } from '@cedh-lab/engine';
-import type { ChoiceRequest, ChoiceSelection, GameEvent, LegalAction } from '@cedh-lab/engine';
-import { Registry, resolveTrigger } from '@cedh-lab/cards';
+import { Engine, defaultChoicePolicy } from '@cedh-lab/engine';
+import type {
+  ChoicePolicy, ChoiceRequest, ChoiceSelection, GameEvent, LegalAction,
+} from '@cedh-lab/engine';
+import type { Registry } from '@cedh-lab/cards';
 import {
   observe,
   HeuristicPolicy,
@@ -22,8 +25,6 @@ import {
 } from '@cedh-lab/ai';
 import type { DeckModel, KnownCard, Observation, PolicyContext, DriverStats } from '@cedh-lab/ai';
 import type { GameAction, ServerMsg } from '@cedh-lab/protocol';
-import { adaptEngine, defaultChoicePolicy, UnsupportedEngineFeature } from './engine-adapter.js';
-import type { DriverEngine } from './engine-adapter.js';
 import { buildSeatView, filterEventForSeat, toWireEvent } from './views.js';
 
 export interface SeatCallbacks {
@@ -38,14 +39,13 @@ export interface RoomOptions {
   decks: { seat: number; list: string[]; commander?: string[] }[];
   seed: number;
   callbacks: SeatCallbacks;
-  /** Human choice timeout; contract default 120s. */
+  /** Human choice timeout; contract default 120s. Timers are not decision code. */
   choiceTimeoutMs?: number;
 }
 
 export class GameRoom {
   readonly podId: string;
   readonly engine: Engine;
-  readonly adapter: DriverEngine;
   private readonly registry: Registry;
   private readonly cb: SeatCallbacks;
   private readonly aiSeats: Set<number>;
@@ -54,6 +54,7 @@ export class GameRoom {
   private readonly beliefs = new Map<number, BeliefTracker>();
   private readonly memories = new Map<number, Map<number, KnownCard[]>>();
   private readonly choiceTimeoutMs: number;
+  private readonly choiceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly stats: DriverStats = {
     illegalProposals: 0, applyFailures: 0, abortedPlans: 0,
     unsupportedPauses: 0, perSeatIllegal: new Map(), log: [],
@@ -65,17 +66,10 @@ export class GameRoom {
   private started = false;
   private finished = false;
 
-  private choiceWaiters = new Map<string, {
-    req: ChoiceRequest;
-    resolve: (s: ChoiceSelection) => void;
-    attempts: number;
-  }>();
-
   private constructor(engine: Engine, registry: Registry, opts: RoomOptions) {
     this.podId = opts.podId;
     this.engine = engine;
     this.registry = registry;
-    this.adapter = adaptEngine(engine);
     this.cb = opts.callbacks;
     this.aiSeats = new Set(opts.seats.map((s, i) => (s.isAI ? i : -1)).filter((i) => i >= 0));
     this.choiceTimeoutMs = opts.choiceTimeoutMs ?? 120_000;
@@ -89,6 +83,10 @@ export class GameRoom {
         this.beliefs.set(d.seat, new BeliefTracker(d.seat, seats, this.deckModels));
       }
     }
+    // The engine owns the choice flow: askChoice sets game.pendingChoice, then
+    // awaits this policy. AI seats decide inline; human seats pend until the
+    // client answers via applyAction({kind:'answerChoice'}) or the timeout fires.
+    this.engine.choicePolicy = this.choicePolicy;
   }
 
   static create(opts: RoomOptions, registry: Registry): GameRoom {
@@ -108,12 +106,56 @@ export class GameRoom {
   isAI(seat: number): boolean { return this.aiSeats.has(seat); }
   get lastSeq(): number { return this.engine.game.events.length - 1; }
 
+  /**
+   * The room's choice policy (installed on the engine in the constructor).
+   * AI seats answer inline via their HeuristicPolicy; human seats register a
+   * deferred resolver answered later by `engine.answerChoice` (or the
+   * deterministic timeout fallback). Never throws on a well-formed request.
+   */
+  private readonly choicePolicy: ChoicePolicy = async (req, game) => {
+    if (this.isAI(req.player)) {
+      const policy = this.policies.get(req.player);
+      try {
+        if (policy?.decideChoice) return policy.decideChoice(req);
+      } catch {
+        // A policy must never break resolution — fall through to the default.
+      }
+      return defaultChoicePolicy(req, game);
+    }
+    return this.deferHumanChoice(req);
+  };
+
+  /**
+   * Pend a human choice: broadcast views (so the choosing seat sees
+   * `pendingChoice`), register the engine resolver, and resolve on
+   * `engine.answerChoice` — or on the deterministic default policy when
+   * `choiceTimeoutMs` elapses.
+   */
+  private deferHumanChoice(req: ChoiceRequest): Promise<ChoiceSelection> {
+    // game.pendingChoice is already set by askChoice; this broadcast carries it.
+    this.broadcastViews();
+    return new Promise<ChoiceSelection>((resolve) => {
+      const timer = setTimeout(() => {
+        this.choiceTimers.delete(req.id);
+        // Fallback is the engine's default policy: deterministic, never throws
+        // on a well-formed request. (Timers are orchestration, not decision code.)
+        void defaultChoicePolicy(req, this.engine.game).then(resolve);
+      }, this.choiceTimeoutMs);
+      this.choiceTimers.set(req.id, timer);
+      this.engine.registerChoiceResolver(req.id, (sel) => {
+        const t = this.choiceTimers.get(req.id);
+        if (t !== undefined) { clearTimeout(t); this.choiceTimers.delete(req.id); }
+        resolve(sel);
+      });
+    });
+  }
+
   // ---------------- lifecycle ----------------
 
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    this.engine.turns.startGame(0);
+    await this.engine.turns.startGame(0);
     if (this.engine.turns.grantsPriority(this.engine.game.turn.phase)) {
       this.engine.priority.startRound();
     }
@@ -133,9 +175,16 @@ export class GameRoom {
       case 'concede':
         g.lose(seat, 'conceded');
         break;
-      case 'answerChoice':
-        await this.answerChoice(seat, action.choiceId, action.selection);
-        return; // choice flow re-enters pump itself
+      case 'answerChoice': {
+        // The engine validates against the pending request; invalid → throw,
+        // game state unchanged. index.ts converts this to {t:'error'}.
+        try {
+          this.engine.answerChoice(seat, action.choiceId, action.selection);
+        } catch (err) {
+          throw new Error(`invalid choice: ${(err as Error).message}`);
+        }
+        break;
+      }
       case 'pass':
         this.requirePriority(seat);
         this.engine.priority.pass(seat);
@@ -145,17 +194,16 @@ export class GameRoom {
       case 'activate': {
         this.requirePriority(seat);
         const legalAction = this.matchClientAction(seat, action);
-        this.applyEngineAction(seat, action, legalAction);
+        await this.applyEngineAction(seat, action, legalAction);
         break;
       }
       case 'declareAttackers':
-        this.requirePriority(seat);
-        await this.adapter.declareAttackers(seat, action.attackers);
-        break;
       case 'declareBlockers':
-        this.requirePriority(seat);
-        await this.adapter.declareBlockers(seat, action.blockers);
-        break;
+        // Combat declarations are engine-driven: during the declare-attackers /
+        // declare-blockers steps the engine asks for choices (arriving as
+        // pendingChoice); the client answers with answerChoice. There is no
+        // direct engine entry point to invoke.
+        throw new Error('combat declarations are made by answering the pending choice during combat steps');
       default:
         throw new Error(`unknown action kind: ${(action as { kind: string }).kind}`);
     }
@@ -198,10 +246,10 @@ export class GameRoom {
   }
 
   /** Apply an already-validated human action. Client-supplied targets/modes are honored. */
-  private applyEngineAction(seat: number, action: GameAction, legalAction: LegalAction): void {
+  private async applyEngineAction(seat: number, action: GameAction, legalAction: LegalAction): Promise<void> {
     const id = legalAction.objectId!;
     if (action.kind === 'cast') {
-      this.engine.stack.castSpell(seat, id, {
+      await this.engine.stack.castSpell(seat, id, {
         targets: action.targets,
         modes: action.modes,
         namedCard: action.namedCard,
@@ -211,11 +259,11 @@ export class GameRoom {
       return;
     }
     if (action.kind === 'playLand') {
-      this.engine.playLand(seat, id);
+      await this.engine.playLand(seat, id);
       return;
     }
     if (action.kind === 'activate') {
-      this.engine.activateAbility(seat, id, legalAction.abilityIndex ?? 0, { targets: action.targets });
+      await this.engine.activateAbility(seat, id, legalAction.abilityIndex ?? 0, { targets: action.targets });
       const isMana = !!((legalAction.detail ?? {}) as Record<string, unknown>).mana;
       if (!isMana) this.engine.priority.actionTaken(seat);
       return;
@@ -225,7 +273,13 @@ export class GameRoom {
 
   // ---------------- the priority loop ----------------
 
-  /** Run priority/AI/resolution until a human must act or the game ends. Re-entrancy safe. */
+  /**
+   * Run priority/AI/resolution until a human must act or the game ends.
+   * Re-entrancy safe. Choices are not polled here: they block inside
+   * `resolveTop` via the installed choicePolicy, which pends the pump until
+   * the human answers (answerChoice) or the timeout fires — the engine owns
+   * the choice flow.
+   */
   async pump(): Promise<void> {
     if (this.finished) return;
     if (this.pumpActive) { this.pumpQueued = true; return; }
@@ -233,21 +287,14 @@ export class GameRoom {
     try {
       let guard = 0;
       while (!this.engine.game.isOver && guard++ < 20_000) {
-        // 1. Outstanding choice? (async contract; currently dormant in the engine)
-        const pc = this.adapter.pendingChoice();
-        if (pc) {
-          await this.resolveChoice(pc);
-          this.afterMutation();
-          continue;
-        }
-        // 2. Priority round state
+        // 1. Priority round state
         const p = this.engine.priority.currentPlayer();
         if (p === null) {
           if (this.engine.game.turn.stack.length === 0) {
-            if (!this.advancePhase()) break;
+            if (!(await this.advancePhase())) break;
             continue;
           }
-          await this.adapter.resolveTop();
+          await this.engine.resolveTop();
           this.afterMutation();
           continue;
         }
@@ -259,7 +306,7 @@ export class GameRoom {
           await this.aiTakeTurn(p);
           continue;
         }
-        // 3. Human must act: prompt + views, then wait.
+        // 2. Human must act: prompt + views, then wait.
         this.sendPrompt(p);
         break;
       }
@@ -275,10 +322,10 @@ export class GameRoom {
     }
   }
 
-  private advancePhase(): boolean {
+  private async advancePhase(): Promise<boolean> {
     const g = this.engine.game;
     if (g.isOver) return false;
-    this.engine.turns.nextPhase();
+    await this.engine.turns.nextPhase();
     this.afterMutation();
     if (this.engine.turns.grantsPriority(g.turn.phase)) {
       this.engine.priority.startRound();
@@ -319,27 +366,16 @@ export class GameRoom {
     if (!decision || decision.action.kind === 'pass') {
       this.engine.priority.pass(p);
     } else {
-      await this.applyAiPlan(p, policy, obs, model, decision.plan?.length ? decision.plan : [decision.action]);
+      await this.applyAiPlan(p, model, decision.plan?.length ? decision.plan : [decision.action]);
     }
     this.afterMutation();
   }
 
   /** Execute an AI plan step by step; stop at the first invalidated step (never crash the loop). */
-  private async applyAiPlan(
-    p: number, policy: HeuristicPolicy, obs: Observation, model: DeckModel, steps: LegalAction[],
-  ): Promise<void> {
+  private async applyAiPlan(p: number, model: DeckModel, steps: LegalAction[]): Promise<void> {
     for (const step of steps) {
       const match = matchesLegal(step, this.engine.legalActionsFor(p));
       if (!match) break;
-      if (match.kind === 'choice') {
-        // Choice actions route through the choice flow with the AI's own policy.
-        const pc = this.adapter.pendingChoice();
-        if (!pc) break;
-        const sel = policy.decideChoice ? await policy.decideChoice(pc) : await defaultChoicePolicy(pc);
-        try { await this.adapter.answerChoice(p, pc.id, sel); }
-        catch { break; }
-        continue;
-      }
       try {
         await applyLegalAction(this.engine, p, match, model);
       } catch {
@@ -349,66 +385,6 @@ export class GameRoom {
     // A plan of only mana abilities / land drops leaves priority with the AI: pass.
     if (this.engine.priority.currentPlayer() === p && !this.engine.game.isOver) {
       this.engine.priority.pass(p);
-    }
-  }
-
-  // ---------------- choices ----------------
-
-  /**
-   * Resolve an outstanding choice: AI seats use their policy's decideChoice;
-   * human seats get a prompt and `choiceTimeoutMs` to answer before the
-   * deterministic default policy answers for them. Public so tests can drive
-   * the choice path directly.
-   */
-  async requestChoice(req: ChoiceRequest): Promise<ChoiceSelection> {
-    if (this.isAI(req.player)) {
-      const policy = this.policies.get(req.player);
-      const sel = policy?.decideChoice ? await policy.decideChoice(req) : await defaultChoicePolicy(req);
-      return sel;
-    }
-    this.broadcastViews(); // includes pendingChoice for the choosing seat
-    return new Promise<ChoiceSelection>((resolve) => {
-      const timer = setTimeout(() => {
-        this.choiceWaiters.delete(req.id);
-        void defaultChoicePolicy(req).then(resolve);
-      }, this.choiceTimeoutMs);
-      this.choiceWaiters.set(req.id, {
-        req,
-        attempts: 0,
-        resolve: (s) => { clearTimeout(timer); this.choiceWaiters.delete(req.id); resolve(s); },
-      });
-    });
-  }
-
-  async answerChoice(seat: number, choiceId: string, selection: ChoiceSelection): Promise<void> {
-    const w = this.choiceWaiters.get(choiceId);
-    if (!w) throw new Error(`no pending choice ${choiceId}`);
-    if (w.req.player !== seat) throw new Error('that choice is not yours to make');
-    w.resolve(selection);
-  }
-
-  private async resolveChoice(req: ChoiceRequest): Promise<void> {
-    const sel = await this.requestChoice(req);
-    try {
-      await this.adapter.answerChoice(req.player, req.id, sel);
-    } catch (err) {
-      if (err instanceof UnsupportedEngineFeature) {
-        // Engine workstream hasn't wired answerChoice yet; pendingChoice can't
-        // arise from the current engine, so this is a dormant-path guard.
-        console.warn(`[room ${this.podId}] choice ${req.id} unanswerable: ${err.message}`);
-        return;
-      }
-      // Invalid selection: tell the human and re-ask (bounded).
-      const attempts = (this.choiceWaiters.get(req.id)?.attempts ?? 0) + 1;
-      this.cb.sendTo(req.player, {
-        t: 'error', code: 'INVALID_CHOICE',
-        message: `invalid choice: ${(err as Error).message} (attempt ${attempts}/3)`,
-      });
-      if (attempts >= 3) {
-        await this.adapter.answerChoice(req.player, req.id, await defaultChoicePolicy(req));
-        return;
-      }
-      return this.resolveChoice(req);
     }
   }
 
@@ -454,9 +430,8 @@ export class GameRoom {
 
   private broadcastViews(): void {
     const g = this.engine.game;
-    const pc = this.adapter.pendingChoice();
     for (let s = 0; s < g.players.length; s++) {
-      const view = buildSeatView(this.engine, s, this.memories.get(s)!, pc);
+      const view = buildSeatView(this.engine, s, this.memories.get(s)!);
       this.cb.sendTo(s, {
         t: 'view', seat: s, observation: view.observation, legal: view.legal,
         pendingChoice: view.pendingChoice,
@@ -464,11 +439,26 @@ export class GameRoom {
     }
   }
 
+  /**
+   * Re-send the priority prompt to a seat if the game is currently parked
+   * waiting on that human seat's action (e.g. they connected after /start, or
+   * reconnected and missed the prompt). Safe to call any time: no-ops unless
+   * the room is genuinely awaiting this seat.
+   */
+  nudge(seat: number): void {
+    const g = this.engine.game;
+    if (g.isOver) return;
+    if (this.isAI(seat)) return;
+    if (g.pendingChoice) return; // choice flow prompts separately
+    if (this.engine.priority.currentPlayer() !== seat) return;
+    if (g.players[seat]?.hasLost) return;
+    this.sendPrompt(seat);
+  }
+
   private sendPrompt(seat: number): void {
     this.cb.sendTo(seat, { t: 'priority', seat });
     // Refresh that seat's view so the prompt carries fresh legal actions.
-    const pc = this.adapter.pendingChoice();
-    const view = buildSeatView(this.engine, seat, this.memories.get(seat)!, pc);
+    const view = buildSeatView(this.engine, seat, this.memories.get(seat)!);
     this.cb.sendTo(seat, {
       t: 'view', seat, observation: view.observation, legal: view.legal,
       pendingChoice: view.pendingChoice,
@@ -477,7 +467,7 @@ export class GameRoom {
 
   /** Per-seat snapshot for reconnect when >500 events behind. */
   snapshotFor(seat: number): { seq: number; view: ReturnType<typeof buildSeatView> } {
-    return { seq: this.lastSeq, view: buildSeatView(this.engine, seat, this.memories.get(seat)!, this.adapter.pendingChoice()) };
+    return { seq: this.lastSeq, view: buildSeatView(this.engine, seat, this.memories.get(seat)!) };
   }
 }
 

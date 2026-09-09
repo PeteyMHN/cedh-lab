@@ -4,12 +4,15 @@
  *  2. hidden views contain no opponent hand cards
  *  3. reconnect catch-up (missed events + snapshot threshold)
  *  4. a 2-mocked-human + 2-AI pod completes a game
- *  5. choice timeout falls back to the default policy
- *  6. deck validation
+ *  5. choice timeout falls back to the default policy (real engine.askChoice)
+ *  6. choice answer resolves the deferred resolver; invalid answers rejected
+ *  7. human cast action flows through the async engine and broadcasts CAST
+ *  8. nudge re-sends a missed priority prompt to a parked human seat (no-op otherwise)
+ *  9. deck validation
  */
 import { describe, expect, it } from 'vitest';
 import { Registry } from '@cedh-lab/cards';
-import type { ChoiceRequest, GameEvent } from '@cedh-lab/engine';
+import type { GameEvent } from '@cedh-lab/engine';
 import type { ServerMsg } from '@cedh-lab/protocol';
 import { GameRoom } from '../src/driver.js';
 import { assertNoLeak } from '../src/views.js';
@@ -171,26 +174,109 @@ describe('game room', () => {
   it('choice request times out to the default policy', async () => {
     const cap = capture();
     const room = makeRoom(cap, { choiceTimeoutMs: 50 });
-    const req: ChoiceRequest = {
-      id: 'choice_test_1', player: 0, kind: 'yesNo', prompt: 'test prompt',
-    };
-    const sel = await room.requestChoice(req);
+    // A real engine.askChoice for a human seat: the room's installed
+    // choicePolicy defers, registers the resolver, and falls back to the
+    // engine default policy when the timeout elapses.
+    const sel = await room.engine.askChoice(0, { player: 0, kind: 'yesNo', prompt: 'test prompt' });
     expect(sel).toEqual({ kind: 'yesNo', value: false });
+    expect(room.engine.game.pendingChoice).toBeNull();
+    // The choosing seat saw the pending choice in its broadcast view.
+    const v = lastView(cap, 0);
+    expect(v.pendingChoice).toBeTruthy();
+    expect(v.pendingChoice!.player).toBe(0);
   });
 
-  it('choice answer resolves the waiter', async () => {
+  it('choice answer resolves the deferred resolver', async () => {
     const cap = capture();
     const room = makeRoom(cap, { choiceTimeoutMs: 5000 });
-    const req: ChoiceRequest = {
-      id: 'choice_test_2', player: 1, kind: 'option', prompt: 'pick',
+    await room.start();
+    const asking = room.engine.askChoice(1, {
+      player: 1, kind: 'option', prompt: 'pick',
       options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
-    };
-    const pending = room.requestChoice(req);
-    await room.answerChoice(1, 'choice_test_2', { kind: 'option', index: 1 });
-    const sel = await pending;
-    expect(sel).toEqual({ kind: 'option', index: 1 });
+    });
+    const choiceId = room.engine.game.pendingChoice!.id;
+    expect(room.engine.game.pendingChoice!.player).toBe(1);
+    await room.applyAction(1, { kind: 'answerChoice', choiceId, selection: { kind: 'option', index: 1 } });
+    await expect(asking).resolves.toEqual({ kind: 'option', index: 1 });
+    expect(room.engine.game.pendingChoice).toBeNull();
+  });
+
+  it('invalid choice answer is rejected with state unchanged', async () => {
+    const cap = capture();
+    const room = makeRoom(cap, { choiceTimeoutMs: 5000 });
+    await room.start();
+    const asking = room.engine.askChoice(0, {
+      player: 0, kind: 'option', prompt: 'pick',
+      options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+    });
+    const choiceId = room.engine.game.pendingChoice!.id;
+    const eventsBefore = room.engine.game.events.length;
+    // index out of range → invalid; the waiter stays pending, state unchanged.
+    await expect(room.applyAction(0, {
+      kind: 'answerChoice', choiceId, selection: { kind: 'option', index: 7 },
+    })).rejects.toThrow(/invalid choice/i);
+    expect(room.engine.game.events.length).toBe(eventsBefore);
+    expect(room.engine.game.pendingChoice!.id).toBe(choiceId);
+    // Answering someone else's choice is rejected too.
+    await expect(room.applyAction(1, {
+      kind: 'answerChoice', choiceId, selection: { kind: 'option', index: 0 },
+    })).rejects.toThrow(/invalid choice/i);
+    // The real answer still resolves.
+    await room.applyAction(0, { kind: 'answerChoice', choiceId, selection: { kind: 'option', index: 0 } });
+    await expect(asking).resolves.toEqual({ kind: 'option', index: 0 });
+  });
+
+  it('human cast action flows through the async engine and broadcasts CAST', async () => {
+    const cap = capture();
+    const room = makeRoom(cap, { aiSeats: [] }); // all-human: priority stays drivable
+    await room.start();
+    // Seat 0 has priority in upkeep. Give seat 3 mana, pass priority around,
+    // then cast Brainstorm (instant, targetless) via the WS action path.
+    room.engine.mana.add(3, 'U', 2);
+    await room.applyAction(0, { kind: 'pass' });
+    await room.applyAction(1, { kind: 'pass' });
+    await room.applyAction(2, { kind: 'pass' });
+    expect(room.engine.priority.currentPlayer()).toBe(3);
+    const g = room.engine.game;
+    const brainstorm = g.players[3].hand.map((id) => g.getObject(id)).find((o) => o.oracleId === 'brainstorm');
+    expect(brainstorm).toBeTruthy();
+    await room.applyAction(3, { kind: 'cast', card: brainstorm!.id });
+    // The broadcast events for the casting seat include the CAST wire event…
+    const castEvents = (cap.sent.get(3) ?? [])
+      .filter((m) => m.t === 'events')
+      .flatMap((m) => (m as Extract<ServerMsg, { t: 'events' }>).events)
+      .filter((e) => e.type === 'CAST');
+    expect(castEvents.length).toBeGreaterThan(0);
+    expect(castEvents[0].payload.card).toBe('Brainstorm');
+    // …the event chain stays valid, and no hidden info leaked in any view.
+    expect(room.engine.game.verifyChain()).toBe(true);
+    for (const seat of [0, 1, 2, 3]) {
+      const v = lastView(cap, seat);
+      const leaks = assertNoLeak(
+        { observation: v.observation, legal: v.legal, pendingChoice: v.pendingChoice ?? null },
+        seat, room.engine,
+      );
+      expect(leaks).toEqual([]);
+    }
   });
 });
+
+  it('nudge re-sends a missed priority prompt (no-op otherwise)', async () => {
+    const cap = capture();
+    const room = makeRoom(cap, { aiSeats: [1, 2, 3] });
+    await room.start();
+    // Seat 0 (human, first player) is parked awaiting priority.
+    expect(room.engine.priority.currentPlayer()).toBe(0);
+    cap.sent.set(0, []);
+    room.nudge(0);
+    const prompts = (cap.sent.get(0) ?? []).filter((m) => m.t === 'priority');
+    expect(prompts).toHaveLength(1);
+    expect((prompts[0] as { seat: number }).seat).toBe(0);
+    // Nudging a seat that isn't parked is a no-op.
+    const before = (cap.sent.get(1) ?? []).length;
+    room.nudge(1);
+    expect((cap.sent.get(1) ?? []).length).toBe(before);
+  });
 
 describe('deck validation', () => {
   it('rejects unknown cards and wrong size', () => {

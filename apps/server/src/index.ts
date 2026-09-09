@@ -301,6 +301,9 @@ wss.on('connection', (ws: WebSocket, req: unknown) => {
         }
         const snap = room.snapshotFor(seat);
         send(ws, { t: 'view', seat, observation: snap.view.observation, legal: snap.view.legal, pendingChoice: snap.view.pendingChoice });
+        // If the game is parked awaiting this seat's action (connected after
+        // /start, or reconnected), re-send the priority prompt so it can't be missed.
+        room.nudge(seat);
       } else {
         send(ws, { t: 'error', code: 'NOT_STARTED', message: 'pod lobby: game not started yet' });
       }

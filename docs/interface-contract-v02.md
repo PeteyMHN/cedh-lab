@@ -72,6 +72,7 @@ Validation: `Engine.answerChoice(player, choiceId, selection)` validates the sel
 ## 7. Server mapping (server workstream)
 
 - `GameAction` → engine calls: cast → `engine.stack.castSpell` (+ `actionTaken`); activate → `engine.activateAbility`; playLand → `engine.playLand` (must exist on Engine); pass → `priority.pass`; answerChoice → `engine.answerChoice`.
+- **Combat declarations** (`declareAttackers`/`declareBlockers` GameActions): the engine drives these through `askChoice` during the combat-phase steps (no direct `Engine.declareAttackers` entry point exists). The server rejects direct declare actions with an explanatory `{t:'error'}`; humans declare via the choice modal, AI via `decideChoice`.
 - After every action: run `resolveTop` loop while all players passed (i.e., reuse the priority driver), then broadcast `events` + per-seat `view` (via `observe()` from `@cedh-lab/ai`).
 - Priority prompt: when `priority.currentPlayer()` is a human seat, send `{ t:'priority', seat }`; the client responds with an action or pass.
 - Reconnect: client sends last seen seq; server replies with snapshot (if >500 events behind) or missed events.
