@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@cedh-lab/engine": ["../../packages/engine/src/index.ts"],
+      "@cedh-lab/cards": ["../../packages/cards/src/index.ts"],
+      "@cedh-lab/ai": ["../../packages/ai/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

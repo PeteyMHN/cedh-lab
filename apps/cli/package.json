@@ -1,0 +1,1 @@
+{"dependencies":{"@cedh-lab/ai":"*","@cedh-lab/cards":"*","@cedh-lab/engine":"*","tsx":"^4.19.0"},"extends":"../../tsconfig.base.json","name":"cedh-cli","private":true,"scripts":{"demo:ai":"tsx src/demo-ai.ts","demo:game":"tsx src/demo-game.ts","demo:stack":"tsx src/demo-stack.ts"},"type":"module","version":"0.1.0"}

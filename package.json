@@ -1,0 +1,27 @@
+{
+  "description": "The definitive digital cEDH testing environment",
+  "engines": {
+    "node": ">=20"
+  },
+  "name": "cedh-lab",
+  "private": true,
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "demo:ai": "npm run demo:ai --workspace apps/cli",
+    "demo:game": "npm run demo:game --workspace apps/cli",
+    "demo:stack": "npm run demo:stack --workspace apps/cli",
+    "dev": "npm run dev --workspace apps/web",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p packages/engine && tsc --noEmit -p packages/cards && tsc --noEmit -p packages/ai && tsc --noEmit -p apps/cli"
+  },
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}
