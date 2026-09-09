@@ -8,5 +8,5 @@ export default defineConfig({
       '@cedh-lab/ai': path.resolve(__dirname, 'packages/ai/src/index.ts'),
     },
   },
-  test: { include: ['packages/*/test/**/*.test.ts'], testTimeout: 15000 },
+  test: { include: ['packages/*/test/**/*.test.ts', 'apps/*/test/**/*.test.ts'], testTimeout: 15000 },
 });

@@ -12,7 +12,7 @@
     "demo:stack": "npm run demo:stack --workspace apps/cli",
     "dev": "npm run dev --workspace apps/web",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p packages/engine && tsc --noEmit -p packages/cards && tsc --noEmit -p packages/ai && tsc --noEmit -p apps/cli"
+    "typecheck": "tsc --noEmit -p packages/engine && tsc --noEmit -p packages/cards && tsc --noEmit -p packages/ai && tsc --noEmit -p apps/cli && tsc --noEmit -p apps/server"
   },
   "version": "0.1.0",
   "workspaces": [
