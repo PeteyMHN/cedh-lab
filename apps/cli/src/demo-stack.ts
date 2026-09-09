@@ -16,7 +16,7 @@ import { makeEngine, setupScenario, runPriority, printStack, printBoard, findInH
 const D = (extra: string[]) => ['island', 'island', 'island', 'island', 'island', 'island',
   'brainstorm', 'counterspell', 'dark-ritual', 'swords-to-plowshares', 'island', 'island', ...extra];
 
-const { engine: e } = makeEngine(
+const { engine: e } = await makeEngine(
   ['Active', 'Counter', 'Remora', 'Study'],
   [D(['mystic-remora']), D(['rhystic-study']), D(['mystic-remora']), D(['rhystic-study'])],
   2024,
@@ -31,20 +31,20 @@ e.paymentPolicy = (player, amount, source) => {
   console.log(`  [payment] P${player} declines to pay {${amount}} for ${source}`);
   return false;
 };
-e.turns.enterPhase('draw');
-e.turns.enterPhase('precombatMain');
+await e.turns.enterPhase('draw');
+await e.turns.enterPhase('precombatMain');
 
 console.log('=== THE FISH BOWL — APNAP triggers + trigger independence (seed 2024) ===');
 printBoard(e);
 
 let p1Done = false;
-function decide(e: Engine, p: number): DecideResult {
+async function decide(e: Engine, p: number): Promise<DecideResult> {
   if (p === 0) {
     const bs = findInHand(e, 0, 'brainstorm');
     const isl = findUntapped(e, 0, 'island');
-    if (bs && isl) { e.activateAbility(0, isl, 0); console.log('  P0 taps Island → {U}'); return 'acted'; }
+    if (bs && isl) { await e.activateAbility(0, isl, 0); console.log('  P0 taps Island → {U}'); return 'acted'; }
     if (bs && !isl) {
-      e.stack.castSpell(0, bs); e.priority.actionTaken(0);
+      await e.stack.castSpell(0, bs); e.priority.actionTaken(0);
       console.log('  P0 casts Brainstorm — both fish trigger!');
       printStack(e);
       const order = e.game.turn.stack.map((s) => `${s.cardName} (P${s.controller})`).join(' < ');
@@ -58,9 +58,9 @@ function decide(e: Engine, p: number): DecideResult {
     const cs = findInHand(e, 1, 'counterspell');
     if (bs && cs) {
       const isl = findUntapped(e, 1, 'island');
-      if (isl && e.game.players[1].manaPool.U < 2) { e.activateAbility(1, isl, 0); console.log('  P1 taps Island → {U}'); return 'acted'; }
+      if (isl && e.game.players[1].manaPool.U < 2) { await e.activateAbility(1, isl, 0); console.log('  P1 taps Island → {U}'); return 'acted'; }
       if (e.game.players[1].manaPool.U >= 2) {
-        e.stack.castSpell(1, cs, { targets: [bs.id] }); e.priority.actionTaken(1);
+        await e.stack.castSpell(1, cs, { targets: [bs.id] }); e.priority.actionTaken(1);
         p1Done = true;
         console.log('  P1 casts Counterspell targeting Brainstorm (the fish already triggered — they resolve anyway)');
         printStack(e); return 'acted';
@@ -71,7 +71,7 @@ function decide(e: Engine, p: number): DecideResult {
   return 'pass';
 }
 
-runPriority(e, decide, "P0's precombat main — the fish bowl");
+await runPriority(e, decide, "P0's precombat main — the fish bowl");
 
 console.log('\n=== RESULT ===');
 printBoard(e);

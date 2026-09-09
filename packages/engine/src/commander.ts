@@ -21,23 +21,29 @@ export class CommanderSystem {
     const pl = g.players[player];
     const o = g.getObject(commanderId);
     if (o.zone !== 'command' || !pl.commanderIds.includes(commanderId)) throw new Error('not your commander in command zone');
+    // Drannith Magistrate: opponents can't cast spells from anywhere but their hands
+    for (const [, other] of g.objects) {
+      if (other.zone === 'battlefield' && other.oracleId === 'drannith-magistrate' && other.controller !== player) {
+        throw new Error('cannot cast: Drannith Magistrate');
+      }
+    }
     const tax = this.taxOf(player, commanderId);
     const base = this.cardCost(o.oracleId);
-    this.mana.spend(player, base.generic + tax, base.colored as Partial<Record<'W' | 'U' | 'B' | 'R' | 'G', number>>);
+    // Jeweled Lotus mana (restricted 'commander' pool) may pay the whole cost incl. tax
+    this.mana.spend(player, base.generic + tax, base.colored as Partial<Record<'W' | 'U' | 'B' | 'R' | 'G', number>>, { commanderOk: true });
     pl.commanderCasts[commanderId] = (pl.commanderCasts[commanderId] ?? 0) + 1;
     g.emit('COMMANDER_CAST', { player, commander: commanderId, card: o.cardName, tax });
     return castInto(player, commanderId);
   }
 
   /** 903.9a/b: if commander would go to graveyard/exile/library/hand, owner may put it in command zone instead. */
-  maybeToCommandZone(player: number, commanderId: string, destination: 'graveyard' | 'exile' | 'library' | 'hand',
-    chooser: (p: number) => 'command' | 'destination'): void {
+  async maybeToCommandZone(player: number, commanderId: string, destination: 'graveyard' | 'exile' | 'library' | 'hand',
+    chooser: (p: number) => Promise<'command' | 'destination'>): Promise<void> {
     const g = this.game;
     const o = g.getObject(commanderId);
-    const choice = chooser(player);
+    const choice = await chooser(player);
     g.emit('COMMANDER_REPLACEMENT_CHOICE', { player, commander: commanderId, destination, choice });
     if (choice === 'command') {
-      // remove from wherever it was headed; place in command zone
       g.moveZone(commanderId, 'command', player);
     } else {
       g.moveZone(commanderId, destination, player);

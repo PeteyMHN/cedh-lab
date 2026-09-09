@@ -18,9 +18,9 @@ describe('determinism', () => {
     const e = testEngine([[...ISLANDS, 'brainstorm'], [...ISLANDS]]);
     expect(e.game.verifyChain()).toBe(true);
   });
-  it('snapshot/restore round-trips', () => {
+  it('snapshot/restore round-trips', async () => {
     const e = testEngine([[...ISLANDS, 'dark-ritual'], [...ISLANDS]], 5);
-    place(e, 0, 'dark-ritual', 'hand');
+    await place(e, 0, 'dark-ritual', 'hand');
     const snap = e.game.snapshot();
     const hashBefore = e.game.events[e.game.events.length - 1].hash;
     e.game.draw(0, 2);
@@ -32,25 +32,25 @@ describe('determinism', () => {
 });
 
 describe('stack', () => {
-  it('resolves LIFO', () => {
+  it('resolves LIFO', async () => {
     const e = testEngine([[...ISLANDS, 'swamp', 'brainstorm', 'dark-ritual'], [...ISLANDS]], 7);
-    e.turns.enterPhase('precombatMain');
-    place(e, 0, 'brainstorm', 'hand');
-    place(e, 0, 'dark-ritual', 'hand');
-    place(e, 0, 'island', 'battlefield');
-    place(e, 0, 'swamp', 'battlefield');
-    const tap = (oracleId: string) => {
+    await e.turns.enterPhase('precombatMain');
+    await place(e, 0, 'brainstorm', 'hand');
+    await place(e, 0, 'dark-ritual', 'hand');
+    await place(e, 0, 'island', 'battlefield');
+    await place(e, 0, 'swamp', 'battlefield');
+    const tap = async (oracleId: string) => {
       const id = e.game.players[0].battlefield.find((x) => e.game.getObject(x).oracleId === oracleId && !e.game.getObject(x).tapped)!;
-      e.activateAbility(0, id, 0);
+      await e.activateAbility(0, id, 0);
     };
     e.priority.startRound();
-    tap('island');
-    e.stack.castSpell(0, handHas(e, 0, 'brainstorm')!); // bottom of stack
+    await tap('island');
+    await e.stack.castSpell(0, handHas(e, 0, 'brainstorm')!); // bottom of stack
     e.priority.actionTaken(0);
-    tap('swamp');
-    e.stack.castSpell(0, handHas(e, 0, 'dark-ritual')!); // top of stack
+    await tap('swamp');
+    await e.stack.castSpell(0, handHas(e, 0, 'dark-ritual')!); // top of stack
     e.priority.actionTaken(0);
-    passAll(e);
+    await passAll(e);
     const resolves = e.game.events.filter((ev) => ev.type === 'RESOLVE_END').map((ev) => ev.payload.card);
     // Dark Ritual was cast last → resolves first
     expect(resolves.indexOf('Dark Ritual')).toBeLessThan(resolves.indexOf('Brainstorm'));
@@ -58,33 +58,33 @@ describe('stack', () => {
     expect(e.game.verifyChain()).toBe(true);
   });
 
-  it('counterspell removes the spell, which never resolves', () => {
+  it('counterspell removes the spell, which never resolves', async () => {
     const e = testEngine([
       [...ISLANDS, 'island', 'brainstorm'],
       [...ISLANDS, 'island', 'island', 'counterspell'],
     ], 11);
-    e.turns.enterPhase('precombatMain');
-    place(e, 0, 'brainstorm', 'hand');
-    place(e, 0, 'island', 'battlefield');
-    place(e, 1, 'counterspell', 'hand');
-    place(e, 1, 'island', 'battlefield');
-    place(e, 1, 'island', 'battlefield');
-    const tapOne = (p: number) => {
+    await e.turns.enterPhase('precombatMain');
+    await place(e, 0, 'brainstorm', 'hand');
+    await place(e, 0, 'island', 'battlefield');
+    await place(e, 1, 'counterspell', 'hand');
+    await place(e, 1, 'island', 'battlefield');
+    await place(e, 1, 'island', 'battlefield');
+    const tapOne = async (p: number) => {
       const id = e.game.players[p].battlefield.find((x) => e.game.getObject(x).oracleId === 'island' && !e.game.getObject(x).tapped)!;
-      e.activateAbility(p, id, 0);
+      await e.activateAbility(p, id, 0);
     };
     e.priority.startRound();
     // P0 casts Brainstorm
-    tapOne(0);
-    e.stack.castSpell(0, handHas(e, 0, 'brainstorm')!);
+    await tapOne(0);
+    await e.stack.castSpell(0, handHas(e, 0, 'brainstorm')!);
     e.priority.actionTaken(0);
     e.priority.pass(0); // P1's turn for priority
     // P1 counters it
-    tapOne(1); tapOne(1);
+    await tapOne(1); await tapOne(1);
     const bs = e.game.turn.stack.find((s) => s.cardName === 'Brainstorm')!;
-    e.stack.castSpell(1, handHas(e, 1, 'counterspell')!, { targets: [bs.id] });
+    await e.stack.castSpell(1, handHas(e, 1, 'counterspell')!, { targets: [bs.id] });
     e.priority.actionTaken(1);
-    passAll(e);
+    await passAll(e);
     // brainstorm countered: in graveyard, never resolved (no RESOLVE_END for it)
     const bsObj = e.game.players[0].graveyard.map((id) => e.game.getObject(id));
     expect(bsObj.some((o) => o.oracleId === 'brainstorm')).toBe(true);
@@ -92,32 +92,32 @@ describe('stack', () => {
     expect(e.game.verifyChain()).toBe(true);
   });
 
-  it('a spell with no legal targets on resolution fizzles (two Swords, one Elf)', () => {
+  it('a spell with no legal targets on resolution fizzles (two Swords, one Elf)', async () => {
     const e = testEngine([
       [...ISLANDS, 'plains', 'swords-to-plowshares'],
       [...ISLANDS, 'plains', 'swords-to-plowshares', 'llanowar-elves'],
     ], 13);
-    e.turns.enterPhase('precombatMain');
-    place(e, 0, 'plains', 'battlefield');
-    place(e, 0, 'swords-to-plowshares', 'hand');
-    place(e, 1, 'plains', 'battlefield');
-    place(e, 1, 'swords-to-plowshares', 'hand');
-    const elfId = place(e, 1, 'llanowar-elves', 'battlefield');
-    const tapPlains = (p: number) => {
+    await e.turns.enterPhase('precombatMain');
+    await place(e, 0, 'plains', 'battlefield');
+    await place(e, 0, 'swords-to-plowshares', 'hand');
+    await place(e, 1, 'plains', 'battlefield');
+    await place(e, 1, 'swords-to-plowshares', 'hand');
+    const elfId = await place(e, 1, 'llanowar-elves', 'battlefield');
+    const tapPlains = async (p: number) => {
       const id = e.game.players[p].battlefield.find((x) => e.game.getObject(x).oracleId === 'plains' && !e.game.getObject(x).tapped)!;
-      e.activateAbility(p, id, 0);
+      await e.activateAbility(p, id, 0);
     };
     e.priority.startRound();
     // P0: Swords #1 targeting the Elf
-    tapPlains(0);
-    e.stack.castSpell(0, handHas(e, 0, 'swords-to-plowshares')!, { targets: [elfId] });
+    await tapPlains(0);
+    await e.stack.castSpell(0, handHas(e, 0, 'swords-to-plowshares')!, { targets: [elfId] });
     e.priority.actionTaken(0);
     e.priority.pass(0); // P1's turn for priority
     // P1: Swords #2 targeting the same Elf (resolves first)
-    tapPlains(1);
-    e.stack.castSpell(1, handHas(e, 1, 'swords-to-plowshares')!, { targets: [elfId] });
+    await tapPlains(1);
+    await e.stack.castSpell(1, handHas(e, 1, 'swords-to-plowshares')!, { targets: [elfId] });
     e.priority.actionTaken(1);
-    passAll(e);
+    await passAll(e);
     // Elf exiled by Swords #2; P1 (its controller) gained 1 life
     expect(e.game.getObject(elfId).zone).toBe('exile');
     expect(e.game.players[1].life).toBe(41);

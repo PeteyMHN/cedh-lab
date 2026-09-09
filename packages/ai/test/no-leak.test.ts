@@ -30,12 +30,12 @@ describe('ai hidden information', () => {
     expect(obs.opponents[0].handCount).toBe(e.game.players[1].hand.length);
   });
 
-  it('policy explanation cannot leak hidden cards it never saw', () => {
+  it('policy explanation cannot leak hidden cards it never saw', async () => {
     const e = testEngine([
       [...ISLANDS, 'island', 'island', 'counterspell'],
       [...ISLANDS, 'swamp', 'demonic-consultation', 'force-of-will'],
     ], 43);
-    e.turns.enterPhase('precombatMain');
+    await e.turns.enterPhase('precombatMain');
     place(e, 0, 'counterspell', 'hand');
     place(e, 0, 'island', 'battlefield');
     place(e, 0, 'island', 'battlefield');
@@ -45,13 +45,13 @@ describe('ai hidden information', () => {
     e.priority.startRound();
     e.priority.pass(0);
     const sw = e.game.players[1].battlefield.find((x) => e.game.getObject(x).oracleId === 'swamp')!;
-    e.activateAbility(1, sw, 0);
-    e.stack.castSpell(1, handHas(e, 1, 'demonic-consultation')!, { namedCard: "Thassa's Oracle" });
+    await e.activateAbility(1, sw, 0);
+    await e.stack.castSpell(1, handHas(e, 1, 'demonic-consultation')!, { namedCard: "Thassa's Oracle" });
     e.priority.actionTaken(1);
     // float UU for P0
     for (const id of e.game.players[0].battlefield) {
       const o = e.game.getObject(id);
-      if (o.oracleId === 'island' && !o.tapped) e.activateAbility(0, id, 0);
+      if (o.oracleId === 'island' && !o.tapped) await e.activateAbility(0, id, 0);
     }
     const obs = observe(e, 0);
     const legal = e.legalActionsFor(0);

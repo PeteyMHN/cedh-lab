@@ -10,4 +10,7 @@ export * from './layers.js';
 export * from './commander.js';
 export * from './triggers.js';
 export * from './scripts.js';
+export * from './choices.js';
+export * from './combat.js';
+export * from './replacements.js';
 export * from './engine.js';

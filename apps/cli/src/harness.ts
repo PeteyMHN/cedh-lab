@@ -80,7 +80,7 @@ export function setupScenario(e: Engine, setup: { player: number; hand?: string[
 }
 
 export type DecideResult = 'acted' | 'pass' | 'stop' | void;
-export type DecideFn = (e: Engine, player: number) => DecideResult;
+export type DecideFn = (e: Engine, player: number) => DecideResult | Promise<DecideResult>;
 
 /**
  * Run priority rounds until the stack is empty and everyone passes.
@@ -89,7 +89,7 @@ export type DecideFn = (e: Engine, player: number) => DecideResult;
  *   'pass' | void — pass priority
  *   'stop' — end the loop (scenario complete)
  */
-export function runPriority(e: Engine, decide: DecideFn, label = ''): void {
+export async function runPriority(e: Engine, decide: DecideFn, label = ''): Promise<void> {
   if (label) console.log(`\n── priority: ${label} ──`);
   e.priority.startRound();
   let guard = 0;
@@ -100,7 +100,7 @@ export function runPriority(e: Engine, decide: DecideFn, label = ''): void {
       if (e.game.turn.stack.length > 0) {
         const top = e.game.turn.stack[e.game.turn.stack.length - 1];
         console.log(`  …all passed, resolving: ${top.cardName}`);
-        e.resolveTop();
+        await e.resolveTop();
         printStack(e);
         e.priority.startRound();
         continue;
@@ -108,20 +108,20 @@ export function runPriority(e: Engine, decide: DecideFn, label = ''): void {
       console.log('  …all passed, stack empty.');
       return;
     }
-    const r = decide(e, p);
+    const r = await decide(e, p);
     if (r === 'stop') return;
     if (r !== 'acted') e.priority.pass(p);
   }
   throw new Error('priority loop guard tripped');
 }
 
-export function makeEngine(names: string[], decks: string[][], seed = 42): { engine: Engine; cfgs: PlayerConfig[] } {
+export async function makeEngine(names: string[], decks: string[][], seed = 42): Promise<{ engine: Engine; cfgs: PlayerConfig[] }> {
   const registry = new Registry();
   const cfgs: PlayerConfig[] = names.map((name, i) => ({
     name, deckOracleIds: decks[i], commanderOracleIds: [],
   }));
   const engine = new Engine(cfgs, registry, { seed });
   engine.triggerResolver = resolveTrigger;
-  engine.turns.startGame(0);
+  await engine.turns.startGame(0);
   return { engine, cfgs };
 }

@@ -5,6 +5,9 @@
  */
 import { CardDefinition, Color } from '../../engine/src/types.js';
 import { CardRegistryLike, CardScript, ScriptApi } from '../../engine/src/scripts.js';
+import type { Engine } from '../../engine/src/engine.js';
+import { TIER2A_DEFS, TIER2A_SCRIPTS, resolveTier2aTrigger } from './tier2a.js';
+import { TIER2B_DEFS, TIER2B_SCRIPTS, TOKEN_SCRIPTS } from './tier2b.js';
 
 const LEGAL = { commander: 'legal' as const };
 
@@ -29,6 +32,15 @@ export const CARD_DEFS: CardDefinition[] = [
   def({ oracleId: 'llanowar-elves', name: 'Llanowar Elves', manaCost: '{G}', cmc: 1, types: ['creature'], subtypes: ['Elf', 'Druid'], supertypes: [],
     colors: ['G'], colorIdentity: ['G'], power: '1', toughness: '1', oracleText: '{T}: Add {G}.', keywords: [],
     abilities: [{ kind: 'mana', text: '{T}: Add {G}.' }] }),
+  // ---- test dummies (engine/combat tests only; not real cEDH cards) ----
+  def({ oracleId: 'test-grizzly', name: 'Test Grizzly', manaCost: '{1}{G}', cmc: 2, types: ['creature'], subtypes: ['Bear'], supertypes: [],
+    colors: ['G'], colorIdentity: ['G'], power: '2', toughness: '2', oracleText: 'Vanilla 2/2.', keywords: [], abilities: [] }),
+  def({ oracleId: 'test-fencer', name: 'Test Fencer', manaCost: '{1}{W}', cmc: 2, types: ['creature'], subtypes: ['Soldier'], supertypes: [],
+    colors: ['W'], colorIdentity: ['W'], power: '1', toughness: '1', oracleText: 'First strike.', keywords: ['first-strike'], abilities: [] }),
+  def({ oracleId: 'test-eagle', name: 'Test Eagle', manaCost: '{2}{U}', cmc: 3, types: ['creature'], subtypes: ['Bird'], supertypes: [],
+    colors: ['U'], colorIdentity: ['U'], power: '2', toughness: '2', oracleText: 'Flying.', keywords: ['flying'], abilities: [] }),
+  def({ oracleId: 'test-menace', name: 'Test Menace', manaCost: '{2}{B}', cmc: 3, types: ['creature'], subtypes: ['Horror'], supertypes: [],
+    colors: ['B'], colorIdentity: ['B'], power: '3', toughness: '3', oracleText: 'Menace.', keywords: ['menace'], abilities: [] }),
   def({ oracleId: 'dark-ritual', name: 'Dark Ritual', manaCost: '{B}', cmc: 1, types: ['instant'], subtypes: [], supertypes: [],
     colors: ['B'], colorIdentity: ['B'], oracleText: 'Add {B}{B}{B}.', keywords: [], abilities: [] }),
   def({ oracleId: 'swords-to-plowshares', name: 'Swords to Plowshares', manaCost: '{W}', cmc: 1, types: ['instant'], subtypes: [], supertypes: [],
@@ -58,43 +70,42 @@ export const CARD_DEFS: CardDefinition[] = [
   def({ oracleId: 'rhystic-study', name: 'Rhystic Study', manaCost: '{2}{U}', cmc: 3, types: ['enchantment'], subtypes: [], supertypes: [],
     colors: ['U'], colorIdentity: ['U'], oracleText: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.',
     keywords: [], abilities: [{ kind: 'triggered', hook: 'ON_CAST', text: 'Whenever an opponent casts a spell...' }] }),
+  ...TIER2A_DEFS,
+  ...TIER2B_DEFS,
 ];
 
-/** helper: pay a mana cost string, honoring alternativeCost for Force of Will */
-function payCost(api: ScriptApi, player: number, objId: string, cost: string, alternativeCost?: string): void {
+/** helper: pay a mana cost string, honoring alternativeCost for Force of Will.
+ * FoW pitch is a real choice: exile a blue card from hand OTHER than itself. */
+async function payCost(api: ScriptApi, player: number, objId: string, cost: string, alternativeCost?: string): Promise<void> {
   const { game, mana } = api;
   if (alternativeCost === 'force-of-will') {
-    // pay 1 life and exile a blue card from hand
     const pl = game.players[player];
-    const blueIdx = pl.hand.findIndex((id) => api.cards.get(game.getObject(id).oracleId).colors.includes('U' as Color));
-    if (blueIdx < 0) throw new Error('FoW alt cost: no blue card in hand');
-    const blueId = pl.hand[blueIdx];
-    game.moveZone(blueId, 'exile', player);
+    const blues = pl.hand.filter((id) =>
+      id !== objId && api.cards.get(game.getObject(id).oracleId).colors.includes('U' as Color));
+    if (blues.length === 0) throw new Error('FoW alt cost: no other blue card in hand (cannot pitch itself)');
+    const sel = await api.askChoice({
+      player, kind: 'card',
+      prompt: 'Force of Will: exile a blue card from your hand to pay its alternative cost.',
+      options: blues.map((id) => ({ id, label: dispName(api, game.getObject(id)) })),
+    });
+    if (sel.kind !== 'card') throw new Error('FoW: expected card choice');
+    game.moveZone(sel.cardId, 'exile', player);
     game.changeLife(player, -1, "Force of Will");
-    game.emit('ALTERNATIVE_COST', { player, card: 'Force of Will', exiled: blueId });
+    game.emit('ALTERNATIVE_COST', { player, card: 'Force of Will', exiled: sel.cardId });
     return;
   }
   mana.spendParsed(player, cost);
 }
 
-function searchLibrary(api: ScriptApi, player: number, toZone: 'hand' | 'top', namedCard?: string): void {
-  const { game } = api;
-  const pl = game.players[player];
-  let idx = 0;
-  if (namedCard) {
-    idx = pl.library.findIndex((id) => game.getObject(id).cardName === namedCard);
-    if (idx < 0) throw new Error(`tutor: ${namedCard} not in library`);
-  }
-  const id = pl.library.splice(idx, 1)[0];
-  if (toZone === 'hand') {
-    pl.hand.push(id);
-    game.getObject(id).zone = 'hand';
-  } else {
-    pl.library.unshift(id);
-    game.getObject(id).zone = 'library';
-  }
-  game.emit('TUTOR', { player, card: game.getObject(id).cardName, to: toZone });
-  game.shuffleLibrary(player);
+/** display name for choice labels (library cards still carry oracleId as cardName) */
+function dispName(api: ScriptApi, o: import('../../engine/src/types.js').GameObject): string {
+  if (o.isToken) return o.cardName;
+  try { return api.cards.get(o.oracleId).name; } catch { return o.cardName; }
+}
+
+/** search via the engine's replacement-aware search pipeline (Opposition Agent etc.) */
+async function searchLibrary(api: ScriptApi, player: number, toZone: 'hand' | 'top', prompt: string): Promise<string | null> {
+  return api.engine.searchLibrary(player, toZone, { prompt });
 }
 
 const tapToUntapGuard = (api: ScriptApi, player: number, objId: string) => {
@@ -115,8 +126,21 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
   'command-tower': {
     abilities: [{ tapCost: true, manaAbility: true }],
     payCosts: (api, p, o) => tapToUntapGuard(api, p, o.id),
-    // simplified: any color; production uses commander's color identity choice
-    onResolve: (api, p) => { api.mana.add(p, 'U', 1); },
+    onResolve: async (api, p) => {
+      const { game } = api;
+      const pl = game.players[p];
+      const identities = pl.commanderIds.flatMap((cid) => {
+        try { return api.cards.get(game.getObject(cid).oracleId).colorIdentity; } catch { return []; }
+      });
+      const colors = [...new Set(identities)] as import('../../engine/src/types.js').Color[];
+      const opts = colors.length > 0 ? colors : ['W', 'U', 'B', 'R', 'G'] as import('../../engine/src/types.js').Color[];
+      const sel = await api.askChoice({
+        player: p, kind: 'color',
+        prompt: "Command Tower: add one mana of any color in your commander's color identity.",
+        options: opts.map((c) => ({ id: c, label: c })),
+      });
+      if (sel.kind === 'color') api.mana.add(p, sel.color, 1);
+    },
   },
   'island': {
     abilities: [{ tapCost: true, manaAbility: true }],
@@ -138,15 +162,36 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
     payCosts: (api, p, o) => tapToUntapGuard(api, p, o.id),
     onResolve: (api, p) => { api.mana.add(p, 'G', 1); },
   },
+  // ---- test dummies ----
+  'test-grizzly': {
+    abilities: [],
+    payCosts: (api, p) => api.mana.spendParsed(p, '{1}{G}'),
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
+  },
+  'test-fencer': {
+    abilities: [],
+    payCosts: (api, p) => api.mana.spendParsed(p, '{1}{W}'),
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
+  },
+  'test-eagle': {
+    abilities: [],
+    payCosts: (api, p) => api.mana.spendParsed(p, '{2}{U}'),
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
+  },
+  'test-menace': {
+    abilities: [],
+    payCosts: (api, p) => api.mana.spendParsed(p, '{2}{B}'),
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
+  },
   'llanowar-elves': {
     abilities: [{ tapCost: true, manaAbility: true }],
     payCosts: (api, p, o, opts) => {
       if (o.zone === 'hand') api.mana.spendParsed(p, '{G}');
       else tapToUntapGuard(api, p, o.id);
     },
-    onResolve: (api, p, o, so) => {
+    onResolve: async (api, p, o, so) => {
       if (so.kind === 'activated') api.mana.add(p, 'G', 1);
-      else api.engine.enterBattlefield(o.id, p);
+      else await api.engine.enterBattlefield(o.id, p);
     },
   },
   'dark-ritual': {
@@ -179,14 +224,61 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
   'demonic-tutor': {
     abilities: [],
     payCosts: (api, p) => api.mana.spendParsed(p, '{1}{B}'),
-    onResolve: (api, p, src, so) => { searchLibrary(api, p, 'hand', so.namedCard); },
+    onResolve: async (api, p) => {
+      await searchLibrary(api, p, 'hand', 'Demonic Tutor: search your library for a card and put it into your hand.');
+    },
   },
   'vampiric-tutor': {
     abilities: [],
     payCosts: (api, p) => api.mana.spendParsed(p, '{B}'),
-    onResolve: (api, p) => {
-      searchLibrary(api, p, 'top');
+    onResolve: async (api, p) => {
+      await searchLibrary(api, p, 'top', 'Vampiric Tutor: search your library for a card and put it on top.');
       api.game.changeLife(p, -2, 'Vampiric Tutor');
+    },
+  },
+  'demonic-consultation': {
+    abilities: [],
+    payCosts: (api, p) => api.mana.spendParsed(p, '{B}'),
+    // exact sequencing: name -> exile top six one at a time -> hit? hand : exile all
+    onResolve: async (api, p, src, so) => {
+      const { game } = api;
+      let named = so.namedCard;
+      if (!named) {
+        const names = [...new Set(api.cards.all().map((d) => d.name))].sort();
+        const sel = await api.askChoice({
+          player: p, kind: 'option',
+          prompt: 'Demonic Consultation: name a card.',
+          options: names.map((n) => ({ id: n, label: n })),
+        });
+        if (sel.kind !== 'option') throw new Error('consultation: expected a card name');
+        named = names[sel.index];
+      }
+      game.emit('CARD_NAMED', { player: p, card: named, source: 'Demonic Consultation' });
+      const pl = game.players[p];
+      const exiled: string[] = [];
+      // top of library is the front of the array (draw() uses shift())
+      for (let i = 0; i < 6 && pl.library.length > 0; i++) {
+        const id = pl.library.shift()!;
+        const o = game.getObject(id);
+        o.zone = 'exile';
+        pl.exile.push(id);
+        exiled.push(id);
+        game.emit('EXILED', { player: p, object: id, card: dispName(api, o), reason: 'Demonic Consultation', n: i + 1 });
+      }
+      const hit = exiled.find((id) => dispName(api, game.getObject(id)) === named);
+      if (hit) {
+        pl.exile.splice(pl.exile.indexOf(hit), 1);
+        pl.hand.push(hit);
+        game.getObject(hit).zone = 'hand';
+        game.emit('CONSULTATION_HIT', { player: p, card: named });
+      } else {
+        while (pl.library.length > 0) {
+          const id = pl.library.shift()!;
+          game.getObject(id).zone = 'exile';
+          pl.exile.push(id);
+        }
+        game.emit('CONSULTATION_MISS', { player: p, card: named });
+      }
     },
   },
   'brainstorm': {
@@ -204,42 +296,12 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
       game.emit('BRAINSTORM', { player: p });
     },
   },
-  'demonic-consultation': {
-    abilities: [],
-    payCosts: (api, p) => api.mana.spendParsed(p, '{B}'),
-    onResolve: (api, p, src, so) => {
-      const { game } = api;
-      const name = so.namedCard ?? 'Thassa\'s Oracle';
-      const pl = game.players[p];
-      const exiled: string[] = [];
-      // exile top six first (simplified: reveal/exile loop covers it)
-      let found: string | null = null;
-      while (pl.library.length > 0) {
-        const id = pl.library.shift()!;
-        exiled.push(id);
-        if (game.getObject(id).cardName === name) { found = id; break; }
-      }
-      for (const id of exiled) {
-        if (id === found) { pl.hand.push(id); game.getObject(id).zone = 'hand'; }
-        else { pl.graveyard.push(id); game.getObject(id).zone = 'exile'; } // exiled pile tracked in exile zone list
-      }
-      // move the non-found exiled ids from graveyard push to exile list properly
-      for (const id of exiled) {
-        if (id !== found) {
-          const gi = pl.graveyard.indexOf(id);
-          if (gi >= 0) pl.graveyard.splice(gi, 1);
-          if (!pl.exile.includes(id)) pl.exile.push(id);
-        }
-      }
-      game.emit('CONSULTATION', { player: p, named: name, found: !!found, exiledCount: exiled.length, libraryLeft: pl.library.length });
-    },
-  },
   'thassas-oracle': {
     abilities: [],
     devotion: { U: 2 },
     payCosts: (api, p) => api.mana.spendParsed(p, '{U}{U}'),
-    onResolve: (api, p, o, so) => {
-      if (so.kind === 'spell') api.engine.enterBattlefield(o.id, p);
+    onResolve: async (api, p, o, so) => {
+      if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p);
     },
     triggersFor: (api, o) => [{
       on: 'ETB',
@@ -254,7 +316,7 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
   'mystic-remora': {
     abilities: [],
     payCosts: (api, p) => api.mana.spendParsed(p, '{U}'),
-    onResolve: (api, p, o, so) => { if (so.kind === 'spell') api.engine.enterBattlefield(o.id, p); },
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
     triggersFor: (api, o) => [
       {
         on: 'CAST',
@@ -286,7 +348,7 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
   'rhystic-study': {
     abilities: [],
     payCosts: (api, p) => api.mana.spendParsed(p, '{2}{U}'),
-    onResolve: (api, p, o, so) => { if (so.kind === 'spell') api.engine.enterBattlefield(o.id, p); },
+    onResolve: async (api, p, o, so) => { if (so.kind === 'spell') await api.engine.enterBattlefield(o.id, p); },
     triggersFor: (api, o) => [{
       on: 'CAST',
       condition: (a, obj, payload) => payload.player !== obj.controller,
@@ -297,13 +359,27 @@ export const CARD_SCRIPTS: Record<string, CardScript> = {
       }),
     }],
   },
+  ...TIER2A_SCRIPTS,
+  ...TIER2B_SCRIPTS,
 };
+
+/**
+ * Register this card pool's token scripts on an engine (Treasure, Bird, ...).
+ * Apps call this once per Engine: `wireTokens(engine)`.
+ */
+export function wireTokens(engine: Engine): void {
+  for (const [key, script] of Object.entries(TOKEN_SCRIPTS)) {
+    engine.tokenScripts.set(key, script);
+  }
+}
 
 /**
  * Trigger resolutions that need game decisions (pay-or-draw, upkeep).
  * Wired by the app: after resolveTop of a triggered ability, call this.
  */
-export function resolveTrigger(api: ScriptApi, so: import('../../engine/src/types.js').StackObject): void {
+export async function resolveTrigger(api: ScriptApi, so: import('../../engine/src/types.js').StackObject): Promise<void> {
+  // tier-2A triggers (Esper Sentinel, Tymna, Kraum, Mana Vault upkeep, ...)
+  if (await resolveTier2aTrigger(api, so)) return;
   const { game } = api;
   const src = game.getObject(so.sourceId);
   const detail = so.detail ?? {};

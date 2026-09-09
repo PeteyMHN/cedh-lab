@@ -21,9 +21,9 @@ describe('commander rules', () => {
     expect(e.game.players[1].hasLost).toBe(true);
   });
 
-  it('priority passes in APNAP turn order', () => {
+  it('priority passes in APNAP turn order', async () => {
     const e = testEngine([[...ISLANDS], [...ISLANDS], [...ISLANDS], [...ISLANDS]], 6);
-    e.turns.enterPhase('precombatMain');
+    await e.turns.enterPhase('precombatMain');
     e.priority.startRound();
     const order: number[] = [];
     let guard = 0;
@@ -36,12 +36,12 @@ describe('commander rules', () => {
     expect(order).toEqual([0, 1, 2, 3]);
   });
 
-  it('state-based actions: lethal damage destroys', () => {
+  it('state-based actions: lethal damage destroys', async () => {
     const e = testEngine([[...ISLANDS, 'llanowar-elves'], [...ISLANDS]], 8);
-    e.turns.enterPhase('precombatMain');
-    const elfId = place(e, 0, 'llanowar-elves', 'battlefield');
+    await e.turns.enterPhase('precombatMain');
+    const elfId = await place(e, 0, 'llanowar-elves', 'battlefield');
     e.game.getObject(elfId).damageMarked = 1; // lethal for 1 toughness
-    e.checkSbas();
+    await e.checkSbas();
     expect(e.game.getObject(elfId).zone).toBe('graveyard');
   });
 });

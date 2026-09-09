@@ -64,6 +64,16 @@ export interface GameObject {
   power?: number;
   toughness?: number;
   damageMarked?: number;
+  /** CR 111: token marker. Tokens cease to exist when leaving the battlefield. */
+  isToken?: boolean;
+  /** token blueprint key (e.g. 'treasure'), used to find its script */
+  tokenKey?: string;
+  /** token blueprint (types/power/toughness/colors) for engine-created tokens */
+  tokenDef?: TokenDef;
+  /** cards imprinted (Chrome Mox etc.): object ids in exile */
+  imprinted?: string[];
+  /** doesn't untap during its controller's untap step (Mana Vault) */
+  skipUntap?: boolean;
 }
 
 export interface ManaPool { W: number; U: number; B: number; R: number; G: number; C: number }
@@ -80,6 +90,8 @@ export interface PlayerState {
   commandZone: string[];
   battlefield: string[];
   manaPool: ManaPool;
+  /** restricted mana, e.g. Jeweled Lotus commander-only mana */
+  restrictedMana: { commander: ManaPool };
   commanderIds: string[];
   commanderDamage: Record<string, number>; // dealt BY commander object id -> amount
   commanderCasts: Record<string, number>;  // object id -> times cast from command zone
@@ -90,6 +102,9 @@ export interface PlayerState {
 
 export type StepOrPhase = Phase;
 
+/** An attack declaration: which creature attacks which player. */
+export interface AttackDeclaration { attacker: string; defender: number; }
+
 export interface TurnState {
   number: number;
   activePlayer: number;
@@ -99,6 +114,33 @@ export interface TurnState {
   stack: StackObject[];
   landsPlayedThisTurn: Record<number, number>;
   spellsCastThisTurn: Record<number, string[]>;
+  /** players who cannot cast spells this turn (Silence etc.) */
+  cantCastSpells: number[];
+  /** draws made during the current draw step, per player (Orcish Bowmasters) */
+  drawStepDraws: Record<number, number>;
+  /** opponents dealt combat damage this turn (Tymna): attacker-player -> defender-player -> total */
+  combatDamageDealtTo: Record<number, Record<number, number>>;
+  /** Esper Sentinel: opponents already taxed this turn */
+  sentinelTaxed: Record<number, boolean>;
+  /** combat declarations for the current combat phase */
+  attackers: AttackDeclaration[];
+  /** block assignments for the current combat phase */
+  blockers: { blocker: string; attacker: string }[];
+  /** colors produced by the most recent mana ability resolution (Kinnan) */
+  lastManaProduced: { player: number; colors: Color[] } | null;
+}
+
+/** Blueprint for Engine.createToken. */
+export interface TokenDef {
+  name: string;
+  types: CardType[];
+  subtypes?: string[];
+  power?: string;
+  toughness?: string;
+  colors?: Color[];
+  keywords?: string[];
+  /** key into the engine's token script registry (abilities like Treasure's) */
+  scriptKey?: string;
 }
 
 export interface StackObject {
@@ -113,6 +155,7 @@ export interface StackObject {
   stormCount?: number;
   namedCard?: string;    // e.g. Demonic Consultation
   detail?: Record<string, unknown>; // trigger-specific data (e.g. { caster })
+  abilityIndex?: number; // for kind 'activated': index into the source's abilities
 }
 
 /** Every mutation of game state is a GameEvent. Hash-chained for replay integrity. */
@@ -122,17 +165,6 @@ export interface GameEvent {
   payload: Record<string, unknown>;
   prevHash: string;
   hash: string;
-}
-
-export interface ChoiceRequest {
-  id: string;
-  player: number;
-  kind: 'modes' | 'targets' | 'number' | 'cardName' | 'color' | 'yesNo' | 'order' | 'zone' | 'sacrifice' | 'discard' | 'pay';
-  prompt: string;
-  options?: string[];
-  min?: number;
-  max?: number;
-  sourceId?: string;
 }
 
 export interface LegalAction {

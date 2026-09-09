@@ -1,6 +1,6 @@
 /** Shared test scaffolding: deterministic engines with scenario-placed cards. */
 import { Engine } from '@cedh-lab/engine';
-import { Registry, resolveTrigger } from '@cedh-lab/cards';
+import { Registry, resolveTrigger, wireTokens } from '@cedh-lab/cards';
 
 export function testEngine(decks: string[][], seed = 1, names?: string[]): Engine {
   const registry = new Registry();
@@ -11,6 +11,7 @@ export function testEngine(decks: string[][], seed = 1, names?: string[]): Engin
   );
   engine.triggerResolver = resolveTrigger;
   engine.paymentPolicy = () => false;
+  wireTokens(engine);
   engine.turns.startGame(0);
   return engine;
 }
@@ -21,7 +22,7 @@ export function handHas(e: Engine, p: number, oracleId: string): string | null {
 }
 
 /** Move a card from library/hand to hand or battlefield. */
-export function place(e: Engine, p: number, oracleId: string, where: 'hand' | 'battlefield'): string {
+export async function place(e: Engine, p: number, oracleId: string, where: 'hand' | 'battlefield'): Promise<string> {
   const g = e.game;
   const pl = g.players[p];
   let id = pl.hand.find((x) => g.getObject(x).oracleId === oracleId) ?? null;
@@ -33,12 +34,12 @@ export function place(e: Engine, p: number, oracleId: string, where: 'hand' | 'b
   }
   const o = g.getObject(id);
   if (where === 'hand') { o.zone = 'hand'; pl.hand.push(id); }
-  else { e.enterBattlefield(id, p); e.permanentEntered(id); }
+  else { await e.enterBattlefield(id, p); }
   return id;
 }
 
 /** Pass priority around until the stack empties (all players pass). */
-export function passAll(e: Engine): void {
+export async function passAll(e: Engine): Promise<void> {
   e.priority.startRound();
   let guard = 0;
   while (guard++ < 300) {
@@ -46,7 +47,7 @@ export function passAll(e: Engine): void {
     const p = e.priority.currentPlayer();
     if (p === null) {
       if (e.game.turn.stack.length === 0) return;
-      e.resolveTop();
+      await e.resolveTop();
       e.priority.startRound();
       continue;
     }

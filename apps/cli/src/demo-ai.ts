@@ -30,14 +30,14 @@ const p1Model: DeckModel = {
   ...oracleModel, commander: 'rival Oracle deck',
 };
 
-const { engine: e } = makeEngine(['AI_Pilot', 'Rival'], [D0, D1], 777);
+const { engine: e } = await makeEngine(['AI_Pilot', 'Rival'], [D0, D1], 777);
 setupScenario(e, [
   { player: 0, hand: ['counterspell'], battlefield: ['island', 'island'] },
   // P1's hand is SECRET: consultation + a hidden Force of Will the AI must not know about
   { player: 1, hand: ['demonic-consultation', 'force-of-will'], battlefield: ['swamp'] },
 ]);
-e.turns.enterPhase('draw');
-e.turns.enterPhase('precombatMain');
+await e.turns.enterPhase('draw');
+await e.turns.enterPhase('precombatMain');
 
 // ---------- 1. mulligan ----------
 const obs0 = observe(e, 0);
@@ -51,19 +51,19 @@ mull.reasons.forEach((r) => console.log(`  - ${r}`));
 e.priority.startRound();
 e.priority.pass(0); // P0 passes; P1 gets priority
 // P1 taps swamp, casts Demonic Consultation naming Thassa's Oracle
-e.activateAbility(1, findUntapped(e, 1, 'swamp')!, 0);
-e.stack.castSpell(1, findInHand(e, 1, 'demonic-consultation')!, { namedCard: "Thassa's Oracle" });
+await e.activateAbility(1, findUntapped(e, 1, 'swamp')!, 0);
+await e.stack.castSpell(1, findInHand(e, 1, 'demonic-consultation')!, { namedCard: "Thassa's Oracle" });
 e.priority.actionTaken(1);
 // now P0 has priority with Counterspell up — ask the AI
 // P0 floats UU first (this is what "holding up Counterspell" means in-engine;
 // compound tap-then-cast planning is on the AI roadmap)
 for (const id of [...e.game.players[0].battlefield]) {
   const o = e.game.getObject(id);
-  if (o.oracleId === 'island' && !o.tapped) { e.activateAbility(0, id, 0); break; }
+  if (o.oracleId === 'island' && !o.tapped) { await e.activateAbility(0, id, 0); break; }
 }
 for (const id of [...e.game.players[0].battlefield]) {
   const o = e.game.getObject(id);
-  if (o.oracleId === 'island' && !o.tapped) { e.activateAbility(0, id, 0); break; }
+  if (o.oracleId === 'island' && !o.tapped) { await e.activateAbility(0, id, 0); break; }
 }
 const obs = observe(e, 0);
 const legal = e.legalActionsFor(0).filter((a) => a.kind !== 'pass');
